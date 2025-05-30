@@ -1,6 +1,5 @@
 #ifndef SEM_UTILS_H
 #define SEM_UTILS_H
-#include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/sem.h>
 // Inizializza un set di semafori

@@ -31,3 +31,10 @@ add_executable(control_client
         ipc/sem_utils.c
         ipc/msg_utils.c
 )
+
+# Dopo le add_executable()
+find_package(OpenSSL REQUIRED)
+
+target_link_libraries(client OpenSSL::Crypto)
+target_link_libraries(server OpenSSL::Crypto)
+target_link_libraries(control_client OpenSSL::Crypto)

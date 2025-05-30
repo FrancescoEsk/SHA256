@@ -1,7 +1,6 @@
 #include "msg_utils.h"
 #include <sys/msg.h>
 #include <stdio.h>
-#include <string.h>
 
 int create_message_queue(key_t key) {
     int msgid = msgget(key, IPC_CREAT | 0666);

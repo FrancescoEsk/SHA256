@@ -3,6 +3,7 @@
 #include <sys/types.h>
 #include <sys/ipc.h>
 #define HASH_SIZE 65
+
 struct message {
     long mtype;
     pid_t pid;
@@ -13,6 +14,7 @@ struct message {
     int last_chunk;             // 1 se ultimo chunk, 0 altrimenti
     key_t shm_key;              // CHIAVE MEMORIA CONDIVISA DEL CLIENT
 };
+
 int create_message_queue(key_t key);
 int send_message(int msgid, struct message* msg);
 int receive_message(int msgid, long mtype, struct message* msg);

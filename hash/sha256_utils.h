@@ -3,13 +3,12 @@
 
 #include <stddef.h>
 
-// Calcola hash SHA-256 su un blocco di dati
-// `output_hash` deve avere almeno 65 byte (64 + 1 per il null terminator)
+// Calcola l'hash SHA-256 di un blocco di dati in memoria (buffer)
+// `output_hash` deve avere almeno 65 byte (64 caratteri esadecimali + 1 per il terminatore null)
 void compute_sha256(const unsigned char* data, size_t len, char* output_hash);
 
-// Calcola hash SHA-256 su un file di qualsiasi dimensione
-// `output_hash` deve avere almeno 65 byte (64 + 1 per il null terminator)
+// Calcola l'hash SHA-256 del contenuto di un file
+// `output_hash` deve avere almeno 65 byte (64 caratteri esadecimali + 1 per il terminatore null)
 void compute_sha256_from_file(const char* path, char* output_hash);
 
 #endif
-

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <errno.h>
 
+// ---- WAIT SEMAFORO ----
 void sem_wait(int semid, int semnum) {
     struct sembuf op;
     op.sem_num = semnum;
@@ -13,6 +14,7 @@ void sem_wait(int semid, int semnum) {
     }
 }
 
+// ---- SIGNAL SEMAFORO ----
 void sem_signal(int semid, int semnum) {
     struct sembuf op;
     op.sem_num = semnum;
@@ -23,6 +25,7 @@ void sem_signal(int semid, int semnum) {
     }
 }
 
+// ---- CREAZIONE SET DI SEMAFORI ----
 int create_semaphore_set(key_t key, int num_sems) {
     int semid = semget(key, num_sems, IPC_CREAT | IPC_EXCL | 0666);
     if (semid == -1) {

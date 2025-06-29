@@ -21,7 +21,7 @@
 #define TMP_PATH_LEN 256
 #define MAX_UPLOADS 64
 
-// Variabili globali
+// ===================== VARIABILI GLOBALI =====================
 int msgid, shmid, semid;
 int max_workers = MAX_WORKERS;
 
@@ -43,13 +43,17 @@ struct pending_request {
 struct pending_request pending_queue[PENDING_QUEUE_SIZE];
 int pending_count = 0;
 
+// ===================== FUNZIONI DI UTILITÀ =====================
+
 void enqueue_pending(const struct message* req) {
     // Inserimento in ordine crescente di filesize
     int i = pending_count - 1;
+
     while (i >= 0 && pending_queue[i].filesize > req->filesize) {
         pending_queue[i+1] = pending_queue[i];
         i--;
     }
+
     pending_queue[i+1].req = *req;
     pending_queue[i+1].filesize = req->filesize;
     pending_count++;
@@ -57,10 +61,13 @@ void enqueue_pending(const struct message* req) {
 
 int dequeue_pending(struct message* out) {
     if (pending_count == 0) return 0;
+
     *out = pending_queue[0].req;
+
     for (int i = 1; i < pending_count; ++i) {
         pending_queue[i-1] = pending_queue[i];
     }
+
     pending_count--;
     return 1;
 }
@@ -81,6 +88,7 @@ struct upload_state* get_upload_state(pid_t pid, unsigned int total_chunks) {
         if (uploads[i].pid == pid)
             return &uploads[i];
     }
+
     for (int i = 0; i < MAX_UPLOADS; ++i) {
         if (uploads[i].pid == 0) {
             uploads[i].pid = pid;
@@ -104,15 +112,77 @@ void clear_upload_state(pid_t pid) {
     }
 }
 
-// main server
+// Funzione di utilità: scrive un buffer su file, flush e chiude
+void scrivi_e_chiudi(FILE *f, const void *buf, size_t size) {
+    fwrite(buf, 1, size, f);
+    fflush(f);
+    fclose(f);
+}
+
+// Funzione di utilità: scrive un chunk su file temporaneo usando la shm
+int scrivi_chunk_su_file(const struct message* req, const struct upload_state* up, int semid) {
+    FILE *tmpf = (req->chunk_id == 0) ? fopen(up->tmp_path, "wb") : fopen(up->tmp_path, "ab");
+
+    if (!tmpf) {
+        perror("[SERVER] Errore apertura file temporaneo");
+        return 0;
+    }
+
+    sem_wait(semid, SEM_MEM);
+    int client_shmid = create_shared_memory(req->shm_key, 65536);
+    void *shmaddr = attach_shared_memory(client_shmid);
+
+    if (!shmaddr) {
+        fclose(tmpf);
+        sem_signal(semid, SEM_MEM);
+        return 0;
+    }
+
+    scrivi_e_chiudi(tmpf, shmaddr, req->filesize);
+    detach_shared_memory(shmaddr);
+    sem_signal(semid, SEM_MEM);
+    return 1;
+}
+
+// Funzione di utilità: invia ack al client
+void invia_ack(const struct message* req, int msgid) {
+    struct message ack;
+    ack.mtype = req->pid;
+    ack.pid = req->pid;
+    memset(ack.hash, 0, sizeof(ack.hash));
+    send_message(msgid, &ack);
+}
+
+// Funzione di utilità: prepara una risposta SHA256 per il client
+struct message crea_risposta_hash(pid_t pid, size_t filesize, const char* hash) {
+    struct message resp = {
+        pid,           // mtype
+        pid,           // pid
+        filesize,      // filesize
+        {0},           // hash (verrà riempito dopo)
+        0,             // chunk_id (non usato in risposta)
+        0,             // total_chunks (non usato in risposta)
+        0,             // last_chunk (non usato in risposta)
+        0              // shm_key (non usato in risposta)
+    };
+
+    strncpy(resp.hash, hash, 65);
+    return resp;
+}
+
+// ===================== MAIN SERVER =====================
+
 int main() {
     // 1. Setup handler SIGINT per cleanup finale
     printf("[SERVER] Avvio e inizializzazione risorse IPC...\n");
     signal(SIGINT, handle_sigint);
+
     // 2. Inizializza coda messaggi (msgget)
     msgid = create_message_queue(MSG_KEY);
+
     // 3. Inizializza memoria condivisa (shmget)
     shmid = create_shared_memory(SHM_KEY, 65536);
+
     // 4. Inizializza semafori (semget + semctl)
     semid = create_semaphore_set(SEM_KEY, 2); // 2 semafori: memoria e worker
     semctl(semid, SEM_MEM, SETVAL, 1);
@@ -120,13 +190,11 @@ int main() {
     memset(uploads, 0, sizeof(uploads));
     printf("[SERVER] In ascolto di richieste client...\n");
 
-    int last_pid = -1;
-    unsigned int last_chunk = 0, last_total = 0;
-
-    // 5. Loop principale:
+    // ===================== LOOP PRINCIPALE =====================
     while (1) {
         struct message req;
-        // SCHEDULAZIONE: se ci sono richieste pendenti, processa SEMPRE la più grande tra quelle pendenti e la richiesta corrente
+        // ===================== SCHEDULAZIONE E SELEZIONE RICHIESTA =====================
+        // Se ci sono richieste pendenti, processa SEMPRE la più grande tra quelle pendenti e la richiesta corrente
         int workers_free = semctl(semid, SEM_PROC, GETVAL);
         if (pending_count > 0 && workers_free > 0) {
             // Trova la richiesta più grande tra la coda e la nuova richiesta (se presente)
@@ -139,14 +207,17 @@ int main() {
                     max_idx = i;
                 }
             }
+
             // Leggi la nuova richiesta
             if (receive_message(msgid, 1, &req) != -1) {
                 if (req.mtype == 99) {
+                    // ===================== CONTROLLO: MODIFICA NUMERO WORKER =====================
                     max_workers = (int)req.filesize;
                     semctl(semid, SEM_PROC, SETVAL, max_workers);
                     printf("[SERVER] Aggiornato max_workers a %d\n", max_workers);
                     continue;
                 }
+
                 if (req.filesize > max_size) {
                     // La nuova richiesta è la più grande
                     to_dispatch = &req;
@@ -164,60 +235,75 @@ int main() {
             } else {
                 // Nessuna nuova richiesta, prendi la più grande dalla coda
                 to_dispatch = &pending_queue[max_idx].req;
+
                 for (int j = max_idx + 1; j < pending_count; ++j) {
                     pending_queue[j-1] = pending_queue[j];
                 }
                 pending_count--;
             }
-            // Dispatch della richiesta selezionata
+
+            // ===================== DISPATCH DELLA RICHIESTA SELEZIONATA =====================
             sem_wait(semid, SEM_PROC);
             printf("[SERVER] Dispatch richiesta pendente (PID=%d, size=%zu)\n", to_dispatch->pid, to_dispatch->filesize);
             struct upload_state* up = get_upload_state(to_dispatch->pid, to_dispatch->total_chunks);
             if (!up) continue;
+
+            // Crea file temporaneo per il chunk
             FILE *tmpf = (to_dispatch->chunk_id == 0) ? fopen(up->tmp_path, "wb") : fopen(up->tmp_path, "ab");
             if (!tmpf) continue;
-            // MUTUA ESCLUSIONE SULLA MEMORIA CONDIVISA
+
+            // ===================== SCRITTURA SU FILE TEMPORANEO (MUTUA ESCLUSIONE SHM) =====================
             sem_wait(semid, SEM_MEM);
             int client_shmid = create_shared_memory(to_dispatch->shm_key, 65536);
             void *shmaddr = attach_shared_memory(client_shmid);
-            if (!shmaddr) { fclose(tmpf); sem_signal(semid, SEM_MEM); continue; }
-            fwrite(shmaddr, 1, to_dispatch->filesize, tmpf);
-            fflush(tmpf);
-            fclose(tmpf);
+
+            if (!shmaddr) {
+                fclose(tmpf);
+                sem_signal(semid, SEM_MEM);
+                continue;
+            }
+
+            scrivi_e_chiudi(tmpf, shmaddr, to_dispatch->filesize);
             detach_shared_memory(shmaddr);
             sem_signal(semid, SEM_MEM);
             up->received_chunks++;
-            // Ack per ogni chunk, anche l'ultimo
+
+            // ===================== INVIO ACK AL CLIENT =====================
             struct message ack;
             ack.mtype = to_dispatch->pid;
             ack.pid = to_dispatch->pid;
             memset(ack.hash, 0, sizeof(ack.hash));
             send_message(msgid, &ack);
+
             if (!to_dispatch->last_chunk) {
                 sem_signal(semid, SEM_PROC);
                 continue;
             }
+
+            // ===================== ULTIMO CHUNK: CALCOLO HASH E RISPOSTA =====================
             pid_t pid = fork();
+
             if (pid == 0) {
+                // Processo figlio: calcola hash SHA256 e invia risposta al client
                 char hash[65] = {0};
                 compute_sha256_from_file(up->tmp_path, hash);
-                struct message resp;
-                resp.mtype = to_dispatch->pid;
-                resp.pid = to_dispatch->pid;
-                resp.filesize = to_dispatch->filesize;
-                strncpy(resp.hash, hash, 65);
+                struct message resp = crea_risposta_hash(to_dispatch->pid, to_dispatch->filesize, hash);
                 send_message(msgid, &resp);
                 printf("\n[SERVER] Hash fornito al client PID=%d\n", to_dispatch->pid);
-                remove(up->tmp_path);
-                sem_signal(semid, SEM_PROC);
+
+                remove(up->tmp_path); // Elimina file temporaneo
+                sem_signal(semid, SEM_PROC); // Libera un worker
                 exit(0);
             }
+
             clear_upload_state(to_dispatch->pid);
-            while (waitpid(-1, NULL, WNOHANG) > 0);
+            while (waitpid(-1, NULL, WNOHANG) > 0)
             continue;
         }
-        // Legge messaggi (msgrcv)
+
+        // ===================== GESTIONE RICHIESTE SENZA PENDENZE =====================
         if (receive_message(msgid, 1, &req) == -1) continue;
+
         // Stampa solo se cambia PID o chunk, ma stampa SOLO l'inizio e la fine upload
         if (req.chunk_id == 0) {
             printf("[SERVER] Inizio upload da client PID=%d, size=%zu, chunk %u/%u\n",
@@ -227,6 +313,7 @@ int main() {
             printf("[SERVER] Fine upload da client PID=%d, size=%zu, chunk %u/%u\n",
                    req.pid, req.filesize * req.total_chunks, req.chunk_id+1, req.total_chunks);
         }
+
         // Gestione messaggio di controllo
         if (req.mtype == 99) { // CONTROL_TYPE
             max_workers = (int)req.filesize;
@@ -247,36 +334,12 @@ int main() {
             continue;
         }
 
-        FILE *tmpf = NULL;
-        if (req.chunk_id == 0)
-            tmpf = fopen(up->tmp_path, "wb");
-        else
-            tmpf = fopen(up->tmp_path, "ab");
-        if (!tmpf) {
-            perror("[SERVER] Errore apertura file temporaneo");
+        if (!scrivi_chunk_su_file(&req, up, semid)) {
             continue;
         }
-
-        sem_wait(semid, SEM_MEM);
-        int client_shmid = create_shared_memory(req.shm_key, 65536);
-        void *shmaddr = attach_shared_memory(client_shmid);
-        if (!shmaddr) {
-            fclose(tmpf);
-            continue;
-        }
-        fwrite(shmaddr, 1, req.filesize, tmpf);
-        fflush(tmpf);
-        fclose(tmpf);
-        detach_shared_memory(shmaddr);
-        sem_signal(semid, SEM_MEM);
 
         up->received_chunks++;
-        // Ack per ogni chunk, anche l'ultimo
-        struct message ack;
-        ack.mtype = req.pid;
-        ack.pid = req.pid;
-        memset(ack.hash, 0, sizeof(ack.hash));
-        send_message(msgid, &ack);
+        invia_ack(&req, msgid);
         if (!req.last_chunk) {
             continue;
         }
@@ -284,25 +347,25 @@ int main() {
         // Ultimo chunk: dispatch worker per hash
         sem_wait(semid, SEM_PROC);
         pid_t pid = fork();
+
         if (pid == 0) {
+            // Processo figlio: calcola hash SHA256 del file temporaneo
             char hash[65] = {0};
             compute_sha256_from_file(up->tmp_path, hash);
-            struct message resp;
-            resp.mtype = req.pid;
-            resp.pid = req.pid;
-            resp.filesize = req.filesize;
-            strncpy(resp.hash, hash, 65);
+            struct message resp = crea_risposta_hash(req.pid, req.filesize, hash);
             send_message(msgid, &resp);
             printf("\n[SERVER] Hash fornito al client PID=%d\n", req.pid);
-            remove(up->tmp_path);
-            sem_signal(semid, SEM_PROC);
+
+            remove(up->tmp_path); // Elimina file temporaneo dopo l'invio della risposta
+            sem_signal(semid, SEM_PROC); // Libera un worker
             exit(0);
         }
+
         clear_upload_state(req.pid);
+
         // Rimuovi figli zombie
         while (waitpid(-1, NULL, WNOHANG) > 0);
     }
-    // 6. Cleanup finale (IPC_RMID)
-    handle_sigint(0);
-    return 0;
+    // 6. Cleanup finale non necessario.
+    // Il ciclo while è infinito e gestisce SIGINT per rimuovere risorse IPC.
 }

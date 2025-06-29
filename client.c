@@ -80,14 +80,16 @@ int main(int argc, char *argv[]) {
         sem_wait(semid, 0);
         memcpy(shmaddr, chunkbuf, chunk_size);
         sem_signal(semid, 0);
+
+        // Prepara il messaggio da inviare al server per questo chunk
         struct message msg = {
-            1,
+            1,                          // tipo messaggio (1 = client->server)
             getpid(),
             chunk_size,
-            {0},
+            {0},                     // hash (non usato in invio, solo in risposta)
             i,
             total_chunks,
-            (i == total_chunks - 1) ? 1 : 0,
+            (i == total_chunks - 1) ? 1 : 0, // last chunk: 1 se è l'ultimo chunk, altrimenti 0
             my_shm_key
         };
         if (send_message(msgid, &msg) == -1) {

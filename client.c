@@ -80,15 +80,16 @@ int main(int argc, char *argv[]) {
         sem_wait(semid, 0);
         memcpy(shmaddr, chunkbuf, chunk_size);
         sem_signal(semid, 0);
-        struct message msg;
-        msg.mtype = 1;
-        msg.pid = getpid();
-        msg.filesize = chunk_size;
-        memset(msg.hash, 0, sizeof(msg.hash));
-        msg.chunk_id = i;
-        msg.total_chunks = total_chunks;
-        msg.last_chunk = (i == total_chunks - 1) ? 1 : 0;
-        msg.shm_key = my_shm_key;
+        struct message msg = {
+            1,
+            getpid(),
+            chunk_size,
+            {0},
+            i,
+            total_chunks,
+            (i == total_chunks - 1) ? 1 : 0,
+            my_shm_key
+        };
         if (send_message(msgid, &msg) == -1) {
             free(chunkbuf);
             detach_shared_memory(shmaddr);
